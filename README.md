@@ -55,6 +55,8 @@ The next step is to provide your account details. Depending on the authorization
 
 The script allows to run using `environment variables` or `arguments`. Once you understood the information mentioned earlier, move to the the desired run method and check which are your required details.
 
+There is an option to run the Scanner with [computed properties](https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/query/computed-properties?tabs=dotnet#use-computed-properties-in-queries). **This is optional**. If this option is selected, your containers will have a new computed property and a new index only while the scan is running, which will run the query with less RUs.
+
 #### Using environment variables
 
 You will always need to set the variables:
