@@ -47,7 +47,8 @@ namespace CmkScanner
         public static async Task RunScanner(
             CosmosDBAuthType? authType,
             CosmosDBApiTypes? apiType,
-            CosmosDBCredentialForScanner? credentials)
+            CosmosDBCredentialForScanner? credentials,
+            bool useComputedProperties)
         {
             // Check if the user has provided valid inputs.
             if (authType == null)
@@ -81,6 +82,11 @@ namespace CmkScanner
             {
                 CmkScannerUtility.WriteScannerUpdate("Using arguments data...", ConsoleColor.Green);
             }
+            // Check if the user has set the computed properties.
+            if (useComputedProperties)
+            {
+                CmkScannerUtility.WriteScannerUpdate("Using computed properties...", ConsoleColor.Green);
+            }
             // Check if the user has set the data correctly.
             if (!CmkScannerUtility.AreInputValuesValid(
                 credentials,
@@ -104,7 +110,8 @@ namespace CmkScanner
                     case CosmosDBApiTypes.Table:
                         scannerResult = await CosmosClientScanner.ScanWithCosmosClientAsync(
                             credentials,
-                            (CosmosDBAuthType)authType);
+                            (CosmosDBAuthType)authType,
+                            useComputedProperties);
                         break;
                     case CosmosDBApiTypes.MongoDB:
                         scannerResult = await MongoClientScanner.ScanWithMongoWithRestAsync(credentials);

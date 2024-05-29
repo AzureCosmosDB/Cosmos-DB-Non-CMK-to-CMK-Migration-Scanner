@@ -99,6 +99,7 @@ namespace CmkScanner
         public static readonly string ENV_TENANT_ID = "CMK_TENANT_ID";
         public static readonly string ENV_CLIENT_ID = "CMK_CLIENT_ID";
         public static readonly string ENV_CLIENT_SECRET = "CMK_CLIENT_SECRET";
+        public static readonly string ENV_COMPUTED_PROPERTIES = "CMK_COMPUTED_PROPERTIES";
 
         // Message to show when the inputs are invalid or for description in help command.
         public static readonly string HelpError = "\nRun dotnet run -- -h for more information.\n\nTo know more about the specific command, run: dotnet run -- <option> -h.\nExample: dotnet run -- AAD -h\n";
@@ -111,7 +112,7 @@ namespace CmkScanner
         public static readonly string InfoLink = "https://learn.microsoft.com/en-us/azure/cosmos-db/how-to-setup-customer-managed-keys-existing-accounts";
 
         public static RootCommand ManageArgsForCmkScanner(
-            Func<CosmosDBAuthType?, CosmosDBApiTypes?, CosmosDBCredentialForScanner?, Task> runScannerFunction)
+            Func<CosmosDBAuthType?, CosmosDBApiTypes?, CosmosDBCredentialForScanner?, bool, Task> runScannerFunction)
         {
             // Define the options that the user can write in the command line.
             Option<CosmosDBApiTypes?> apiOption = GetApiTypeOption();
@@ -133,6 +134,9 @@ namespace CmkScanner
             var clientSecretOption = GetStringOption(
                 "--client-secret",
                 "The client secret value of the Cosmos DB account. Required if using AAD auth type.");
+            var computedPropertiesOption = GetStringOption(
+                "--use-computed-properties",
+                "Optional: Computed Properties to use in the query. Possible values: true or false. Default is false.");
 
             // Define the commands, with the expected arguments.
             Command usingEnvVariables = 
@@ -143,18 +147,21 @@ namespace CmkScanner
                 hostnameOption,
                 tenantIdOption,
                 clientIdOption,
-                clientSecretOption
+                clientSecretOption,
+                computedPropertiesOption
             };
             Command connectionStringCredentials = new("ConnectionString", "Run Scanner using Connection String Credentials")
             {
                 apiOption,
-                connectionStringOption
+                connectionStringOption,
+                computedPropertiesOption
             };
             Command accountKeyCredentials = new("AccountKey", "Run Scanner using Account Key Credentials")
             {
                 apiOption,
                 hostnameOption,
-                accountKeyOption
+                accountKeyOption,
+                computedPropertiesOption
             };
             // Define the handlers for the commands. Once the command is selected, the handler will be called.
             CosmosDBCredentialForScanner? credentials;
@@ -169,43 +176,65 @@ namespace CmkScanner
                 string apiTypeString = Environment.GetEnvironmentVariable(ENV_API_TYPE);
                 bool isApiTypeValid = 
                     Enum.TryParse(apiTypeString, true, out CosmosDBApiTypes apiType);
+                // Parse optional computed properties.
+                string computedPropertiesString = Environment.GetEnvironmentVariable(ENV_COMPUTED_PROPERTIES);
+                bool useComputedProperties = 
+                    bool.TryParse(computedPropertiesString, out bool computedProperties);
 
                 await runScannerFunction(
                     isAuthTypeValid ? authType : null,
                     isApiTypeValid ? apiType : null,
-                    credentials);
+                    credentials,
+                    useComputedProperties ? computedProperties : false);
             });
-            aadCredentials.SetHandler(async (apiType, hostname, tenantId, clientId, clientSecret) =>
+            aadCredentials.SetHandler(async (apiType, hostname, tenantId, clientId, clientSecret, computedPropertiesString) =>
             {
                 credentials = new()
                 {
                     Hostname = hostname,
                     TenantId = tenantId,
                     ClientId = clientId,
-                    ClientSecret = clientSecret
+                    ClientSecret = clientSecret,
                 };
-                await runScannerFunction(CosmosDBAuthType.AAD, apiType, credentials);
+
+                bool useComputedProperties = 
+                    bool.TryParse(computedPropertiesString, out bool computedProperties);
+                bool useComputePropertiesValue = useComputedProperties ? computedProperties : false;
+
+                await runScannerFunction(CosmosDBAuthType.AAD, apiType, credentials, useComputePropertiesValue);
             },
-            apiOption, hostnameOption, tenantIdOption, clientIdOption, clientSecretOption);
-            connectionStringCredentials.SetHandler(async (apiType, connectionString) =>
+            apiOption, hostnameOption, tenantIdOption, clientIdOption, clientSecretOption, computedPropertiesOption);
+
+            connectionStringCredentials.SetHandler(async (apiType, connectionString, computedPropertiesString) =>
             {
                 credentials = new()
                 {
                     ConnectionString = connectionString
                 };
-                await runScannerFunction(CosmosDBAuthType.ConnectionString, apiType, credentials);
+
+                bool useComputedProperties = 
+                    bool.TryParse(computedPropertiesString, out bool computedProperties);
+                bool useComputePropertiesValue = useComputedProperties ? computedProperties : false;
+
+                await runScannerFunction(CosmosDBAuthType.ConnectionString, apiType, credentials, useComputePropertiesValue);
             },
-            apiOption, connectionStringOption);
-            accountKeyCredentials.SetHandler(async (apiType, hostname, accountKey) =>
+            apiOption, connectionStringOption, computedPropertiesOption);
+
+            accountKeyCredentials.SetHandler(async (apiType, hostname, accountKey, computedPropertiesString) =>
             {
                 credentials = new()
                 {
                     Hostname = hostname,
                     AccountKey = accountKey
                 };
-                await runScannerFunction(CosmosDBAuthType.AccountKey, apiType, credentials);
+
+                bool useComputedProperties = 
+                    bool.TryParse(computedPropertiesString, out bool computedProperties);
+                bool useComputePropertiesValue = useComputedProperties ? computedProperties : false;
+
+                await runScannerFunction(CosmosDBAuthType.AccountKey, apiType, credentials, useComputePropertiesValue);
             },
-            apiOption, hostnameOption, accountKeyOption);
+            apiOption, hostnameOption, accountKeyOption, computedPropertiesOption);
             // Returns the root command with the commands and options.
             return new(ScriptDescription)
             {

@@ -30,8 +30,11 @@ namespace CmkScanner
     public class CosmosClientScanner
     {
         // Query stops once it finds a document with a big ID.
-        public const string kQuery =
+        public const string kQueryWithComputedProperties =
             $"SELECT TOP 1 c.id FROM c WHERE c.{kComputedPropertyForDocumentLengthName} > 990";
+
+        public const string kQuery =
+            $"SELECT TOP 1 c.id FROM c WHERE LENGTH(c.id) > 990";
 
         public const string kComputedPropertyForDocumentLengthName = "TEMP_CosmosDBCmkMigration_DocumentIdLength";
 
@@ -171,6 +174,7 @@ namespace CmkScanner
             string query,
             string databaseName,
             string containerName,
+            bool useComputedProperties,
             CancellationToken cancellationToken)
         {
             // Get the container to run the query.
@@ -178,35 +182,40 @@ namespace CmkScanner
 
             // Read the current container properties.
             var containerProperties = await container.ReadContainerAsync(cancellationToken: cancellationToken);
-            bool shouldUpdateContainer = false;
-            // Make the necessary updates to the container properties.
-            if (!containerProperties.Resource.ComputedProperties.Any(computedProperty => computedProperty.Name == kComputedPropertyForDocumentLengthName))
+
+            // Set computed properties if selected.
+            if (useComputedProperties)
             {
-                containerProperties.Resource.ComputedProperties.Add(
-                    new ComputedProperty
-                    {
-                        Name = kComputedPropertyForDocumentLengthName,
-                        Query = kComputedPropertyForDocumentLengthQuery
-                    });
+                bool shouldUpdateContainer = false;
+                // Make the necessary updates to the container properties.
+                if (!containerProperties.Resource.ComputedProperties.Any(computedProperty => computedProperty.Name == kComputedPropertyForDocumentLengthName))
+                {
+                    containerProperties.Resource.ComputedProperties.Add(
+                        new ComputedProperty
+                        {
+                            Name = kComputedPropertyForDocumentLengthName,
+                            Query = kComputedPropertyForDocumentLengthQuery
+                        });
 
-                shouldUpdateContainer = true;
-            }
+                    shouldUpdateContainer = true;
+                }
 
-            if (!containerProperties.Resource.IndexingPolicy.IncludedPaths.Any(includePath => includePath.Path == kIndexingPolicyPath))
-            {
-                containerProperties.Resource.IndexingPolicy.IncludedPaths.Add(
-                    new IncludedPath()
-                    {
-                        Path = kIndexingPolicyPath                    
-                    });
+                if (!containerProperties.Resource.IndexingPolicy.IncludedPaths.Any(includePath => includePath.Path == kIndexingPolicyPath))
+                {
+                    containerProperties.Resource.IndexingPolicy.IncludedPaths.Add(
+                        new IncludedPath()
+                        {
+                            Path = kIndexingPolicyPath                    
+                        });
 
-                shouldUpdateContainer = true;
-            }
+                    shouldUpdateContainer = true;
+                }
 
-            if (shouldUpdateContainer)
-            {
-                // Update the container with the computed property to index the document IDs.
-                await container.ReplaceContainerAsync(containerProperties, cancellationToken: cancellationToken);
+                if (shouldUpdateContainer)
+                {
+                    // Update the container with the computed property to index the document IDs.
+                    await container.ReplaceContainerAsync(containerProperties, cancellationToken: cancellationToken);
+                }
             }
 
             // Get the iterator ready to run the query.
@@ -305,11 +314,13 @@ namespace CmkScanner
         /// </summary>
         /// <param name="credentials">Account credentials</param>
         /// <param name="authType">Auth type to connect to Cosmos SDK</param>
+        /// <param name="bool">Decides if should use or not computed properties.</param>
         /// <returns>The Scanner Result. See ScannerResult enum for guidance</returns>
         /// <exception cref="TaskCanceledException"></exception>
         public static async Task<ScannerResult> ScanWithCosmosClientAsync(
             CosmosDBCredentialForScanner credentials,
-            CosmosDBAuthType authType)
+            CosmosDBAuthType authType,
+            bool useComputedProperties)
         {
             CancellationTokenSource migrationFailedTokenSource = new();
 
@@ -354,9 +365,10 @@ namespace CmkScanner
                     // Will look for documents with Big Ids. If found one, workflow ends with invalid. 
                     bool wereDocumentsWithBigIdsFound = await SearchForDocumentsWithBigIdsAsync(
                         client,
-                        kQuery,
+                        useComputedProperties ? kQueryWithComputedProperties : kQuery,
                         dbAndCont.Database,
                         dbAndCont.Container,
+                        useComputedProperties,
                         migrationFailedTokenSource.Token);
 
                     if (wereDocumentsWithBigIdsFound)
@@ -385,32 +397,35 @@ namespace CmkScanner
                 }
                 finally
                 {
-                    Container container = client.GetContainer(dbAndCont.Database, dbAndCont.Container);
-
-                    // Read the current container properties.
-                    var containerProperties = await container.ReadContainerAsync();
-                    bool shouldUpdateContainer = false;
-                    // Make the necessary updates to the container properties.
-                    if (containerProperties.Resource.ComputedProperties.Any(computedProperty => computedProperty.Name == kComputedPropertyForDocumentLengthName))
+                    if (useComputedProperties)
                     {
-                        ComputedProperty computedPropertyToRemove = containerProperties.Resource.ComputedProperties.First(computedProperty =>
-                            computedProperty.Name == kComputedPropertyForDocumentLengthName);
-                        containerProperties.Resource.ComputedProperties.Remove(computedPropertyToRemove);
-                        shouldUpdateContainer = true;
-                    }
+                        Container container = client.GetContainer(dbAndCont.Database, dbAndCont.Container);
 
-                    if (containerProperties.Resource.IndexingPolicy.IncludedPaths.Any(includePath => includePath.Path == kIndexingPolicyPath))
-                    {
-                        IncludedPath includedPathToRemove = containerProperties.Resource.IndexingPolicy.IncludedPaths.First(includePath =>
-                            includePath.Path == kIndexingPolicyPath);
-                        containerProperties.Resource.IndexingPolicy.IncludedPaths.Remove(includedPathToRemove);
-                        shouldUpdateContainer = true;
-                    }
+                        // Read the current container properties.
+                        var containerProperties = await container.ReadContainerAsync();
+                        bool shouldUpdateContainer = false;
+                        // Make the necessary updates to the container properties.
+                        if (containerProperties.Resource.ComputedProperties.Any(computedProperty => computedProperty.Name == kComputedPropertyForDocumentLengthName))
+                        {
+                            ComputedProperty computedPropertyToRemove = containerProperties.Resource.ComputedProperties.First(computedProperty =>
+                                computedProperty.Name == kComputedPropertyForDocumentLengthName);
+                            containerProperties.Resource.ComputedProperties.Remove(computedPropertyToRemove);
+                            shouldUpdateContainer = true;
+                        }
 
-                    if (shouldUpdateContainer)
-                    {
-                        // Update the container with the computed property to index the document IDs.
-                        await container.ReplaceContainerAsync(containerProperties);
+                        if (containerProperties.Resource.IndexingPolicy.IncludedPaths.Any(includePath => includePath.Path == kIndexingPolicyPath))
+                        {
+                            IncludedPath includedPathToRemove = containerProperties.Resource.IndexingPolicy.IncludedPaths.First(includePath =>
+                                includePath.Path == kIndexingPolicyPath);
+                            containerProperties.Resource.IndexingPolicy.IncludedPaths.Remove(includedPathToRemove);
+                            shouldUpdateContainer = true;
+                        }
+
+                        if (shouldUpdateContainer)
+                        {
+                            // Update the container with the computed property to index the document IDs.
+                            await container.ReplaceContainerAsync(containerProperties);
+                        }
                     }
                 }
 
