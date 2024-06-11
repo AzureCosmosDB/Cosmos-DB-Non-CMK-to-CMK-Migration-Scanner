@@ -94,6 +94,13 @@ namespace CmkScanner
                 : containers.ToList();
         }
 
+        /// <summary>
+        /// Get the amount of documents in the container. This query only runs after a 429 Too Many Requests
+        /// exception happen. It will get the amount of documents in the container to split the query in batches.
+        /// </summary>
+        /// <param name="container">Affected container by the 429s.</param>
+        /// <param name="cancellationToken">Cancellation token in case unexpected errors happen.</param>
+        /// <returns>Amount of documents in the specific container.</returns>
         public static async Task<int> GetAmountOfDocumentsInContainerAsync(
             Container container,
             CancellationToken cancellationToken)
@@ -190,9 +197,10 @@ namespace CmkScanner
             Container container = client.GetContainer(databaseName, containerName);
 
             // If account is affected for 429s, we will wait and retry with less data in batches.
-            QueryRequestOptions queryRequestOptions = new();
-
-            queryRequestOptions.MaxConcurrency = -1;
+            QueryRequestOptions queryRequestOptions = new()
+            {
+                MaxConcurrency = -1
+            };
 
             if (retryAttemptsForTooManyRequests >= 1)
             {
@@ -202,7 +210,7 @@ namespace CmkScanner
                     // to split the query in batches and optimize results.
                     int totalDocuments = await GetAmountOfDocumentsInContainerAsync(container, cancellationToken);
                     CmkScannerUtility.WriteScannerUpdate(
-                        $"CMK Migration Scanner: Container {containerName} has {totalDocuments} documents.");
+                        $"CMK Migration Scanner: Container {containerName} has {totalDocuments} documents. Distributing query in batches...");
 
                     bool amountOfDocsPerContainerAddedinDict = false;
                     int addDictAttempts = 0;
@@ -223,6 +231,7 @@ namespace CmkScanner
                     throw new Exception("ContainerDocumentCount does not contain the container. Please retry.");
                 }
 
+                // Calculate the batch of documents to get in the query. This value depends on the retry attempts and amount of documents.
                 int documentsToGet =
                     (int)Math.Ceiling(ContainerDocumentCount![containerName] / Math.Pow(exponentialBaseValue, retryAttemptsForTooManyRequests));
 
@@ -233,8 +242,6 @@ namespace CmkScanner
 
                 // We will only query this amount of data per batch.
                 queryRequestOptions.MaxBufferedItemCount = documentsToGet;
-                CmkScannerUtility.WriteScannerUpdate(
-                    $"CMK Migration Scanner: MaxBufferedItemCount set to {queryRequestOptions.MaxBufferedItemCount} documents.");
             }
 
             // Get the iterator ready to run the query.
@@ -254,10 +261,6 @@ namespace CmkScanner
                 // Runs the query and gets the results.
                 FeedResponse<ExpectedResult> currentResultSet =
                     await iterator.ReadNextAsync(cancellationToken);
-
-                CmkScannerUtility.WriteScannerUpdate(
-                    $"RU usage: {currentResultSet.RequestCharge} on request to container: {container.Id}",
-                    ConsoleColor.Blue);
 
                 foreach (ExpectedResult res in currentResultSet)
                 {
@@ -356,6 +359,8 @@ namespace CmkScanner
             int exponentialBaseValue)
         {
             CancellationTokenSource migrationFailedTokenSource = new();
+
+            // Will store the amount of documents per container to optimize the query if fails.
             ContainerDocumentCount = new();
 
             // Initialize the Cosmos client
@@ -390,7 +395,7 @@ namespace CmkScanner
             {
                 bool keepTrying = true;
                 bool? wereDocumentsWithBigIdsFound = null;
-                int attempts = 0;
+                int retryAttemptsForTooManyRequests = 0;
 
                 // This loop works as a retry policy for scenarios when retriable exceptions happen.
                 while (keepTrying)
@@ -402,33 +407,22 @@ namespace CmkScanner
                     }
 
                     CmkScannerUtility.WriteScannerUpdate(
-                        $"Scanning container {dbAndCont.Container} in database {dbAndCont.Database}. Current time: {DateTime.Now}. Retry attempts: {attempts}...");
+                        $"Scanning container {dbAndCont.Container} in database {dbAndCont.Database}. Current time: {DateTime.Now}. Retry attempts: {retryAttemptsForTooManyRequests}...");
                     Stopwatch stopWatchPerRequest = new();
 
                     try
                     {
-                        stopWatchPerRequest.Start();
-
                         // Will look for documents with Big Ids. If found one, workflow ends with invalid.
                         wereDocumentsWithBigIdsFound = await SearchForDocumentsWithBigIdsAsync(
                             client,
                             Query,
                             dbAndCont.Database,
                             dbAndCont.Container,
-                            attempts,
+                            retryAttemptsForTooManyRequests,
                             exponentialBaseValue,
                             migrationFailedTokenSource.Token);
 
-                        CmkScannerUtility.WriteScannerUpdate(
-                            $"Scanning container {dbAndCont.Container} in database {dbAndCont.Database} finished. Big IDs found: {wereDocumentsWithBigIdsFound}",
-                            wereDocumentsWithBigIdsFound.HasValue && wereDocumentsWithBigIdsFound == true ? ConsoleColor.Red : ConsoleColor.Green);
-
-                        stopWatchPerRequest.Stop();
-                        CmkScannerUtility.WriteScannerUpdate(
-                            $"Time taken to scan container {dbAndCont.Container} in database {dbAndCont.Database}: {stopWatchPerRequest.Elapsed.TotalSeconds} seconds.",
-                            ConsoleColor.Blue);
-
-                        // Query done.
+                        // Query done. Exits loop.
                         keepTrying = false;
                     }
                     catch (Exception e)
@@ -443,19 +437,7 @@ namespace CmkScanner
                             if (e is CosmosException cosmosException
                                 && cosmosException.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
                             {
-                                CmkScannerUtility.WriteScannerUpdate(
-                                    $"ERROR: Too many requests caught.",
-                                    ConsoleColor.Red);
-
-                                stopWatchPerRequest.Stop();
-                                CmkScannerUtility.WriteScannerUpdate(
-                                    $"Time taken to scan container {dbAndCont.Container} in database {dbAndCont.Database}: {stopWatchPerRequest.Elapsed.TotalSeconds} seconds.",
-                                    ConsoleColor.Blue);
-
-                                CmkScannerUtility.WriteScannerUpdate(
-                                    $"Exception TooManyRequests, RU usage in total: {cosmosException.RequestCharge} and per second: {cosmosException.RequestCharge/stopWatchPerRequest.Elapsed.TotalSeconds} in container: {dbAndCont.Container}",
-                                    ConsoleColor.Blue);
-
+                                retryAttemptsForTooManyRequests++;
                                 TimeSpan? time = cosmosException.RetryAfter;
                                 if (time != null)
                                 {
@@ -465,8 +447,6 @@ namespace CmkScanner
                                         ConsoleColor.Yellow);
                                     await Task.Delay(delay: (TimeSpan)time);
                                 }
-
-                                attempts++;
                             }
                             else
                             {
@@ -484,6 +464,7 @@ namespace CmkScanner
                     }
                 }
 
+                // Outside the retry loop, we check the result of the query.
                 if (wereDocumentsWithBigIdsFound.HasValue && wereDocumentsWithBigIdsFound == true)
                 {
                     // If a big id is found, set the atomic flag to 1 which means true.
@@ -492,21 +473,18 @@ namespace CmkScanner
                     // Cancel all other tasks, no need to keep searching.
                     migrationFailedTokenSource.Cancel();
                 }
+                else
+                {
+                    // If no big id was found, print a message to the user.
+                    CmkScannerUtility.WriteScannerUpdate(
+                        $"Scanning container {dbAndCont.Container} in database {dbAndCont.Database} finished. There were no big IDs found.",
+                        ConsoleColor.Green);
+                }
             }, migrationFailedTokenSource.Token)).ToList();
-
-
-            // cronometer to measure time.
-            Stopwatch stopwatch = new();
-            stopwatch.Start();
 
             // Wait for all tasks to finish.
             CmkScannerUtility.WriteScannerUpdate("Scanning...");
             await Task.WhenAll(tasks);
-
-            // Stop the cronometer.
-            stopwatch.Stop();
-            CmkScannerUtility.WriteScannerUpdate(
-                $"Scanning finished in {stopwatch.Elapsed.TotalSeconds} seconds.");
 
             return unexpectedError == 1
                 ? ScannerResult.UnexpectedErrorFound

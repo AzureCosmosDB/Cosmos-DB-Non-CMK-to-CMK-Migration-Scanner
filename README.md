@@ -55,6 +55,8 @@ The next step is to provide your account details. Depending on the authorization
 
 The script allows to run using `environment variables` or `arguments`. Once you understood the information mentioned earlier, move to the the desired run method and check which are your required details.
 
+There is an optional value of `exponential-base-value`, which will be used if your account is facing issues with 429s http errors. This value helps to create batches of documents to query, depending on the amount of documents per container and the retry attempts. The value can be from 2 to 10. The default value is 2.
+
 #### Using environment variables
 
 You will always need to set the variables:
