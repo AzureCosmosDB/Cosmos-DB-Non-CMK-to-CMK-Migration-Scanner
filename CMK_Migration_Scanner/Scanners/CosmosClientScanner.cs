@@ -6,7 +6,6 @@ namespace CmkScanner
 {
     using System.Collections.Concurrent;
     using System.Diagnostics;
-    using System.Runtime.CompilerServices;
     using System.Security.Authentication;
     using Azure.Core;
     using Azure.Identity;
@@ -33,7 +32,7 @@ namespace CmkScanner
         public static readonly string Query =
             "SELECT TOP 1 c.id != 0 as DocumentFound FROM c WHERE LENGTH(c.id) > 990";
         public static ConcurrentDictionary<string, int>? ContainerDocumentCount { get; set; }
-        
+
         /// <summary>
         /// Get all containers from the account using the CosmosClient.
         /// </summary>
@@ -184,6 +183,7 @@ namespace CmkScanner
             string databaseName,
             string containerName,
             int retryAttemptsForTooManyRequests,
+            int exponentialBaseValue,
             CancellationToken cancellationToken)
         {
             // Get the container to run the query.
@@ -202,14 +202,14 @@ namespace CmkScanner
                     // to split the query in batches and optimize results.
                     int totalDocuments = await GetAmountOfDocumentsInContainerAsync(container, cancellationToken);
                     CmkScannerUtility.WriteScannerUpdate(
-                        $"CMK Migration Scanner: Container {container.Id} has {totalDocuments} documents.");
+                        $"CMK Migration Scanner: Container {containerName} has {totalDocuments} documents.");
 
                     bool amountOfDocsPerContainerAddedinDict = false;
                     int addDictAttempts = 0;
                     while (!amountOfDocsPerContainerAddedinDict && addDictAttempts < 3)
                     {
                         addDictAttempts++;
-                        amountOfDocsPerContainerAddedinDict = ContainerDocumentCount!.TryAdd(container.Id, totalDocuments);
+                        amountOfDocsPerContainerAddedinDict = ContainerDocumentCount!.TryAdd(containerName, totalDocuments);
                     }
 
                     if (!amountOfDocsPerContainerAddedinDict)
@@ -218,8 +218,13 @@ namespace CmkScanner
                     }
                 }
 
+                if (ContainerDocumentCount!.ContainsKey(containerName) == false)
+                {
+                    throw new Exception("ContainerDocumentCount does not contain the container. Please retry.");
+                }
+
                 int documentsToGet =
-                    (int)Math.Ceiling(ContainerDocumentCount![container.Id] / Math.Pow(2, retryAttemptsForTooManyRequests));
+                    (int)Math.Ceiling(ContainerDocumentCount![containerName] / Math.Pow(exponentialBaseValue, retryAttemptsForTooManyRequests));
 
                 if (documentsToGet <= 1)
                 {
@@ -347,7 +352,8 @@ namespace CmkScanner
         /// <exception cref="TaskCanceledException"></exception>
         public static async Task<ScannerResult> ScanWithCosmosClientAsync(
             CosmosDBCredentialForScanner credentials,
-            CosmosDBAuthType authType)
+            CosmosDBAuthType authType,
+            int exponentialBaseValue)
         {
             CancellationTokenSource migrationFailedTokenSource = new();
             ContainerDocumentCount = new();
@@ -410,6 +416,7 @@ namespace CmkScanner
                             dbAndCont.Database,
                             dbAndCont.Container,
                             attempts,
+                            exponentialBaseValue,
                             migrationFailedTokenSource.Token);
 
                         CmkScannerUtility.WriteScannerUpdate(
