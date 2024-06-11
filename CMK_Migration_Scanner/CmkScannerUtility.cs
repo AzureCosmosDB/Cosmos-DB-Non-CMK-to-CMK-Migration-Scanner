@@ -99,6 +99,7 @@ namespace CmkScanner
         public static readonly string ENV_TENANT_ID = "CMK_TENANT_ID";
         public static readonly string ENV_CLIENT_ID = "CMK_CLIENT_ID";
         public static readonly string ENV_CLIENT_SECRET = "CMK_CLIENT_SECRET";
+        public static readonly string ENV_EXPO_BASE_VALUE = "CMK_EXPO_BASE_VALUE";
 
         // Message to show when the inputs are invalid or for description in help command.
         public static readonly string HelpError = "\nRun dotnet run -- -h for more information.\n\nTo know more about the specific command, run: dotnet run -- <option> -h.\nExample: dotnet run -- AAD -h\n";
@@ -111,7 +112,7 @@ namespace CmkScanner
         public static readonly string InfoLink = "https://learn.microsoft.com/en-us/azure/cosmos-db/how-to-setup-customer-managed-keys-existing-accounts";
 
         public static RootCommand ManageArgsForCmkScanner(
-            Func<CosmosDBAuthType?, CosmosDBApiTypes?, CosmosDBCredentialForScanner?, Task> runScannerFunction)
+            Func<CosmosDBAuthType?, CosmosDBApiTypes?, CosmosDBCredentialForScanner?, int, Task> runScannerFunction)
         {
             // Define the options that the user can write in the command line.
             Option<CosmosDBApiTypes?> apiOption = GetApiTypeOption();
@@ -133,6 +134,9 @@ namespace CmkScanner
             var clientSecretOption = GetStringOption(
                 "--client-secret",
                 "The client secret value of the Cosmos DB account. Required if using AAD auth type.");
+            var exponentialBaseValueOption = GetStringOption(
+                "--exponential-base-value",
+                "The base value for the exponential backoff. Default is 2.");
 
             // Define the commands, with the expected arguments.
             Command usingEnvVariables = 
@@ -143,18 +147,21 @@ namespace CmkScanner
                 hostnameOption,
                 tenantIdOption,
                 clientIdOption,
-                clientSecretOption
+                clientSecretOption,
+                exponentialBaseValueOption
             };
             Command connectionStringCredentials = new("ConnectionString", "Run Scanner using Connection String Credentials")
             {
                 apiOption,
-                connectionStringOption
+                connectionStringOption,
+                exponentialBaseValueOption
             };
             Command accountKeyCredentials = new("AccountKey", "Run Scanner using Account Key Credentials")
             {
                 apiOption,
                 hostnameOption,
-                accountKeyOption
+                accountKeyOption,
+                exponentialBaseValueOption
             };
             // Define the handlers for the commands. Once the command is selected, the handler will be called.
             CosmosDBCredentialForScanner? credentials;
@@ -169,13 +176,16 @@ namespace CmkScanner
                 string apiTypeString = Environment.GetEnvironmentVariable(ENV_API_TYPE);
                 bool isApiTypeValid = 
                     Enum.TryParse(apiTypeString, true, out CosmosDBApiTypes apiType);
+                // Parse optional properties.
+                string exponentialBaseValueString = Environment.GetEnvironmentVariable(ENV_EXPO_BASE_VALUE);
 
                 await runScannerFunction(
                     isAuthTypeValid ? authType : null,
                     isApiTypeValid ? apiType : null,
-                    credentials);
+                    credentials,
+                    GetOptionalExponentialValue(exponentialBaseValueString));
             });
-            aadCredentials.SetHandler(async (apiType, hostname, tenantId, clientId, clientSecret) =>
+            aadCredentials.SetHandler(async (apiType, hostname, tenantId, clientId, clientSecret, exponentialValue) =>
             {
                 credentials = new()
                 {
@@ -184,28 +194,28 @@ namespace CmkScanner
                     ClientId = clientId,
                     ClientSecret = clientSecret
                 };
-                await runScannerFunction(CosmosDBAuthType.AAD, apiType, credentials);
+                await runScannerFunction(CosmosDBAuthType.AAD, apiType, credentials, GetOptionalExponentialValue(exponentialValue));
             },
-            apiOption, hostnameOption, tenantIdOption, clientIdOption, clientSecretOption);
-            connectionStringCredentials.SetHandler(async (apiType, connectionString) =>
+            apiOption, hostnameOption, tenantIdOption, clientIdOption, clientSecretOption, exponentialBaseValueOption);
+            connectionStringCredentials.SetHandler(async (apiType, connectionString, exponentialValue) =>
             {
                 credentials = new()
                 {
                     ConnectionString = connectionString
                 };
-                await runScannerFunction(CosmosDBAuthType.ConnectionString, apiType, credentials);
+                await runScannerFunction(CosmosDBAuthType.ConnectionString, apiType, credentials, GetOptionalExponentialValue(exponentialValue));
             },
-            apiOption, connectionStringOption);
-            accountKeyCredentials.SetHandler(async (apiType, hostname, accountKey) =>
+            apiOption, connectionStringOption, exponentialBaseValueOption);
+            accountKeyCredentials.SetHandler(async (apiType, hostname, accountKey, exponentialValue) =>
             {
                 credentials = new()
                 {
                     Hostname = hostname,
                     AccountKey = accountKey
                 };
-                await runScannerFunction(CosmosDBAuthType.AccountKey, apiType, credentials);
+                await runScannerFunction(CosmosDBAuthType.AccountKey, apiType, credentials, GetOptionalExponentialValue(exponentialValue));
             },
-            apiOption, hostnameOption, accountKeyOption);
+            apiOption, hostnameOption, accountKeyOption, exponentialBaseValueOption);
             // Returns the root command with the commands and options.
             return new(ScriptDescription)
             {
@@ -234,6 +244,33 @@ namespace CmkScanner
             {
                 Console.ForegroundColor = ConsoleColor.White;
             }
+        }
+
+        public static int GetOptionalExponentialValue(string? exponentialBaseValueString)
+        {
+            bool exponentialBaseValue =
+                int.TryParse(exponentialBaseValueString, out int exponentialBase);
+            if (exponentialBaseValue)
+            {
+                // Only valid numbers are from 2 to 10.
+                if (exponentialBase < 2 || exponentialBase > 10)
+                {
+                    WriteScannerUpdate(
+                        "Optional exponential base value must be between 2 and 10. Defaulting to 2.",
+                        ConsoleColor.Yellow);
+                    return 2;
+                }
+
+                WriteScannerUpdate(
+                    $"Selected exponential base value if 429s HTTP errors appear: {exponentialBase}",
+                    ConsoleColor.Green);
+                return exponentialBase;
+            }
+
+            WriteScannerUpdate(
+                "Optional exponential base value not provided. Value must be between 2 and 10. Defaulting to 2.",
+                ConsoleColor.Yellow);
+            return 2;
         }
 
         /// <summary>
