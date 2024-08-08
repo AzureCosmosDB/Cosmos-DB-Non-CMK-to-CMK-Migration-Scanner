@@ -31,7 +31,6 @@ namespace CmkScanner
         // Query stops once it finds a document with a big ID.
         public static readonly string Query =
             "SELECT TOP 1 c.id != 0 as DocumentFound FROM c WHERE LENGTH(c.id) > 990";
-        public static ConcurrentDictionary<string, int>? ContainerDocumentCount { get; set; }
 
         /// <summary>
         /// Get all containers from the account using the CosmosClient.
@@ -204,36 +203,10 @@ namespace CmkScanner
 
             if (retryAttemptsForTooManyRequests >= 1)
             {
-                if (retryAttemptsForTooManyRequests == 1)
-                {
-                    // If it is the first attempt, we get the amount of documents in the container.
-                    // to split the query in batches and optimize results.
-                    int totalDocuments = await GetAmountOfDocumentsInContainerAsync(container, cancellationToken);
-                    CmkScannerUtility.WriteScannerUpdate(
-                        $"CMK Migration Scanner: Container {containerName} has {totalDocuments} documents. Distributing query in batches...");
-
-                    bool amountOfDocsPerContainerAddedinDict = false;
-                    int addDictAttempts = 0;
-                    while (!amountOfDocsPerContainerAddedinDict && addDictAttempts < 3)
-                    {
-                        addDictAttempts++;
-                        amountOfDocsPerContainerAddedinDict = ContainerDocumentCount!.TryAdd(containerName, totalDocuments);
-                    }
-
-                    if (!amountOfDocsPerContainerAddedinDict)
-                    {
-                        throw new Exception("Could not add the amount of documents in the container to the dictionary. Please run the program again.");
-                    }
-                }
-
-                if (ContainerDocumentCount!.ContainsKey(containerName) == false)
-                {
-                    throw new Exception("ContainerDocumentCount does not contain the container. Please retry.");
-                }
-
                 // Calculate the batch of documents to get in the query. This value depends on the retry attempts and amount of documents.
+                int totalDocuments = await GetAmountOfDocumentsInContainerAsync(container, cancellationToken);
                 int documentsToGet =
-                    (int)Math.Ceiling(ContainerDocumentCount![containerName] / Math.Pow(exponentialBaseValue, retryAttemptsForTooManyRequests));
+                    (int)Math.Ceiling(totalDocuments / Math.Pow(exponentialBaseValue, retryAttemptsForTooManyRequests));
 
                 if (documentsToGet <= 1)
                 {
@@ -359,9 +332,6 @@ namespace CmkScanner
             int exponentialBaseValue)
         {
             CancellationTokenSource migrationFailedTokenSource = new();
-
-            // Will store the amount of documents per container to optimize the query if fails.
-            ContainerDocumentCount = new();
 
             // Initialize the Cosmos client
             using CosmosClient client = GetCosmosClient(
